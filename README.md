@@ -588,3 +588,84 @@ $ rails c
 The exponent and retry limit can be increased to spread the retries out over a longer duration. (The values can also be decreased, of course.)
 
 ### Disabling our webhook endpoints
+Another great feature to have is being able to disable webhook endpoints. This could come in handy for us when we want to disable a problem endpoint, but not delete it (so that the problem can be resolved by the endpoint owner.) This feature can also come in handy for our users, by allowing them to keep certain webhook endpoints on-hand, but only have them enabled when they need them.
+
+To accomplish this, we'll want to add a new enabled column to our webhook endpoints:
+
+(There's a relatively wide changeset here — we're touching a lot of files.)
+
+```
+$ rails g migration AddEnabledToWebhookEndpoints
+```
+and then within the migration,
+```ruby
+class AddEnabledToWebhookEndpoints < ActiveRecord::Migration[5.2]
+  def change
+    add_column :webhook_endpoints, :enabled, :boolean,
+      default: true,
+      index: true
+  end
+end
+```
+followed by a "db:migrate".
+Next, we'll want to update the webhook endpoint model to have an enabled scope, and we'll also add a bang-method to disable! a webhook endpoint:
+```ruby 
+class WebhookEndpoint < ApplicationRecord
+   has_many :webhook_events, inverse_of: :webhook_endpoint
+
+   validates :subscriptions, length: { minimum: 1 }, presence: true
+   validates :url, presence: true
+
+  scope :enabled, -> { where(enabled: true) }
+
+   def subscribed?(event)
+    (subscriptions & ['*', event]).any?
+   end
+
+  def disable!
+    update!(enabled: false)
+  end
+end
+```
+
+Next, the broadcast webhook service needs to utilize the new enabled scope so that we only broadcast events to endpoints that are enabled:
+
+```ruby
+def call
+-  WebhookEndpoint.find_each do |webhook_endpoint|
++  WebhookEndpoint.enabled.find_each do |webhook_endpoint|
+     ...
+   end
+end
+```
+
+Finally, we'll update the webhook worker to bail early if the endpoint is disabled:
+
+```ruby
+ def perform(webhook_event_id)
+   ...
+   return unless
+-    webhook_endpoint.subscribed?(webhook_event.event)
++    webhook_endpoint.subscribed?(webhook_event.event) &&
++    webhook_endpoint.enabled?
+   ...
+ end
+```
+If we go ahead and disable our endpoint and then broadcast a new event, we shouldn't see a webhook delivery occur:
+
+```
+$ rails c
+> WebhookEndpoint.last.update!(enabled: false)
+# => true
+> WebhookEvent.count
+# => 2
+> BroadcastWebhookService.call(event: 'events.test', payload: { test: 4 })
+# => nil
+> WebhookEvent.count
+# => 2
+```
+If we had a failed webhook event being retried, and then we disabled the event's endpoint, the worker should stop attempting to retry. We aren't going to test that scenario, but it should be covered by the changeset here.
+
+### Improving error handling
+
+

@@ -23,7 +23,7 @@ class WebhookWorker
       webhook_endpoint.nil? 
 
     return unless 
-      webhook_endpoint.subscribed?(webhook_event.event)
+      webhook_endpoint.subscribed?(webhook_event.event) && webhook_endpoint.enabled?
 
     # Send the webhook request with a 30 second timeout 
     response = HTTP.timeout(30).headers(

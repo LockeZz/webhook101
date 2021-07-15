@@ -5,7 +5,7 @@ class BroadcastWebhookService
   end
 
   def call 
-    WebhookEndpoint.find_each do |webhook_endpoint| 
+    WebhookEndpoint.enabled.find_each do |webhook_endpoint| 
       next unless 
         webhook_endpoint.subscribed?(event)
 
