@@ -294,3 +294,14 @@ Additionally, we should also see a server log indicating that the request was se
 ```
 Started POST "/webhooks" for ::1 at 2021-06-15 10:04:34 -0500
 ```
+
+## Braodcasting our webhook events
+Creating webhook events and devlivering from console were mostly for logic testing purposes. In real world, there are cases where multiple events were being sent at the sametme. 
+
+We will create a service object that helps to streamline the process of broadcasting new events to our webhook endpoints.
+
+Let's create a new services directory.
+```
+$ mkdir app/services
+$ touch app/services/broadcast_webhook_service.rb
+```
