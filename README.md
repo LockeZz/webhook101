@@ -15,7 +15,7 @@ We create our first table, "A WEBHOOK ENDPONT". These are going to represent the
 $ rails g migration CreateWebhookEndpoints
 ```
 and for the migration file
-```
+```ruby
 class CreateWebhookEndpoints < ActiveRecord::Migration[5.2]
   def change
     create_table :webhook_endpoints do |t|
@@ -33,7 +33,7 @@ $ rails g mgiration CreateWebhookEvents
 ```
 
 Then let's define the schema for the event
-```
+```ruby
 class CreateWebhookEvents < ActiveRecord::Migration[5.2]
   def change
     create_table :webhook_events do |t|
