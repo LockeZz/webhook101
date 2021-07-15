@@ -668,4 +668,45 @@ If we had a failed webhook event being retried, and then we disabled the event's
 
 ### Improving error handling
 
+When it comes to sending webhooks, there are a plethora of errors that can occur. From DNS issues, to TLS issues, to an ngrok tunnel no longer being active, to various type of timeouts and connection errors.
 
+For now, we're going to handle the first 2: DNS and TLS issues.
+
+Let's adjust our worker to rescue from a couple error classes:
+
+1. OpenSSL::SSL::SSLError — this means the TLS connection failed, often due to an expired cert. In my experience, these are often short-lived and resolve within the 3 day delivery window that we've configured for retries.
+
+2. HTTP::ConnectionError — this is a general "catch-all" from http.rb. From my experience it usually means DNS, but it's kind of nuanced.
+
+```ruby
+def perform(webhook_event_id)
+  ...
+rescue OpenSSL::SSL::SSLError
+  # Since TLS issues may be due to an expired cert, we'll continue retrying
+  # since the issue may get resolved within the 3 day retry window. This
+  # may be a good place to send an alert to the endpoint owner.
+  webhook_event.update(response: { error: 'TLS_ERROR' })
+
+  # Signal the webhook for retry.
+  raise FailedRequestError
+rescue HTTP::ConnectionError
+  # This error usually means DNS issues. To save us the bandwidth,
+  # we're going to disable the endpoint. This would also be a good
+  # location to send an alert to the endpoint owner.
+  webhook_event.update(response: { error: 'CONNECTION_ERROR' })
+
+  # Disable the problem endpoint.
+  webhook_endpoint.disable!
+rescue HTTP::TimeoutError
+  # This error means the webhook endpoint timed out. We can either
+  # raise a failed request error to trigger a retry, or leave it
+  # as-is and consider timeouts terminal. We'll do the latter.
+  webhook_event.update(response: { error: 'TIMEOUT_ERROR' })
+end
+```
+
+How we handle each of these errors ends up being pretty arbitrary. I just chose these to exemplify how to handle a few different scenarios:
+
+1. Retrying the webhook after an error occurs
+2. Disabling an endpoint after a fatal error
+3. Not retrying after an error
