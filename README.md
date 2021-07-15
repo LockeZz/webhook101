@@ -10,6 +10,7 @@ In noob words, when some event happen, we want to notify all subscribers. An eve
 $ rails new webhook101 --api --database postgresql --skip-active-storage --skip-action-cable
 ```
 
+### Migration
 We create our first table, "A WEBHOOK ENDPONT". These are going to represent the "subscribers" in our webhook system.
 ```
 $ rails g migration CreateWebhookEndpoints
@@ -49,4 +50,45 @@ end
 ```
 and run "db:migrate".
 
+### Models 
+Now we setup the models for the webhooks. One for each of the migrations that we have just created.
+```ruby 
+class WebhookEndpoint < ApplicationRecord
+  has_many :webhook_events, inverse_of: :webhook_endpoint
+
+  validates :url, presence: true
+end
+
+class WebhookEvent < ApplicationRecord
+  belongs_to :webhook_endpoint, inverse_of: :webhook_events
+
+  validates :event, presence: true
+  validates :payload, presence: true
+end
+```
+Now we are ready for a first test in the console..
+
+```
+$ rails c
+> WebhookEndpoint.create!(url: 'https://functions.ecorp.example/webhooks')
+# => #<WebhookEndpoint
+#       id: 1,
+#       url: "https://functions.ecorp.example/webhooks",
+#       created_at: "2021-06-14 22:14:53.587473000 +0000",
+#       updated_at: "2021-06-14 22:14:53.587473000 +0000"
+#     >
+> WebhookEvent.create!(
+    webhook_endpoint: _,
+    event: 'events.test',
+    payload: { test: 1 }
+  )
+# => #<WebhookEvent
+#       id: 1,
+#       webhook_endpoint_id: 1,
+#       event: "events.test",
+#       payload: { "test" => 1 },
+#       created_at: "2021-06-14 22:17:06.908392000 +0000",
+#       updated_at: "2021-06-14 22:17:06.908392000 +0000"
+#     >
+```
 
