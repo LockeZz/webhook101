@@ -525,3 +525,66 @@ $ rails c
 > WebhookEvent.count
 # => 2
 ```
+
+### Improving retry cadence
+
+Right now, we're using Sidekiq's default retry cadence, which is an exponential backoff. This is great for normal background jobs, but in our case, potentially retrying seconds after a failed webhook usually just exacerbates the problem. Sidekiq's default retry cadence is retry_count ** 4, which starts small and eventually gets large.
+
+For example, if a webhook server is timing out because of too many requests, retrying all of them in quick succession until the backoff grows large enough isn't going to help the situation. We can alleviate that risk by adding in a little bit of "jitter" into the retry cadence and increasing the exponent from 4 to 5:
+```
+class WebhookWorker
+  include Sidekiq::Worker
+
+  sidekiq_retry_in do |retry_count|
+    # Exponential backoff, with a random 30-second to 10-minute "jitter"
+    # added in to help spread out any webhook "bursts."
+    jitter = rand(30.seconds..10.minutes).to_i
+
+    (retry_count ** 5) + jitter
+  end
+
+  def perform(webhook_event_id)
+    ...
+  end
+ end
+
+```
+
+This should do a couple things:
+
+Reduce occurrences of instantanous retries, reducing the chance of us exacerbating any issues with the webhook server.
+Help space out sudden large bursts of failing webhooks by using a random jitter between 30 seconds and 10 minutes.
+One other thing we can also do is limit the amount of times a webhook will retry:
+
+```
+class WebhookWorker
+   include Sidekiq::Worker
+
+  sidekiq_options retry: 10, dead: false
+  sidekiq_retry_in do |retry_count|
+    # Exponential backoff, with a random 30-second to 10-minute "jitter"
+    # added in to help spread out any webhook "bursts."
+    jitter = rand(30.seconds..10.minutes).to_i
+
+    (retry_count ** 5) + jitter
+  end
+
+  def perform(webhook_event_id)
+    ...
+  end
+ end
+```
+
+Here we've set the maximum number of retries to 10, and we've also told Sidekiq to not store these failed webhooks in its set of "dead" jobs. We don't care about dead webhook jobs. With our retry exponent of 5 and a maximum retry limit of 10, retries should occur over approximately 3 days:
+```
+$ rails c
+> include ActionView::Helpers::DateHelper
+> total = 0.0
+> 10.times { |i| total += ((i + 1) ** 5) + rand(30.seconds..10.minutes) }
+> distance_of_time_in_words(total)
+# => "3 days"
+```
+
+The exponent and retry limit can be increased to spread the retries out over a longer duration. (The values can also be decreased, of course.)
+
+### Disabling our webhook endpoints
