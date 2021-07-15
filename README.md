@@ -6,6 +6,9 @@ A quick introduction for how to define our webhook resources here.
 In noob words, when some event happen, we want to notify all subscribers. An event here take it quite literally, i.e. "a successful payment", "a user updated his profile" etc. A subscriber are "people" who want to get notified when these thing happen. So, whenever the event trigger, subscriber will get "NOTIFIED".
 
 ## GETTING STARTED
+
+Pre-requisite: Please make sure you have a redis server install in your macine for sidekiq to work.
+
 ```
 $ rails new webhook101 --api --database postgresql --skip-active-storage --skip-action-cable
 ```
@@ -305,3 +308,94 @@ Let's create a new services directory.
 $ mkdir app/services
 $ touch app/services/broadcast_webhook_service.rb
 ```
+
+Remember to update application.rb for Rails to detect the newly created file.
+```ruby
+config.eager_load_paths += %W( 
+      #{config.root}/workers
+      #{config.root}/services
+    )
+```
+
+The service object can accept an event and a payload. It will then create a new webhook event for each endpoint and queue it up for delivery.
+
+```ruby 
+class BroadcastWebhookService
+  def self.call(event:, payload:)
+    new(event: event, payload: payload).call
+  end
+
+  def call
+    WebhookEndpoint.find_each do |webhook_endpoint|
+      webhook_event = WebhookEvent.create!(
+        webhook_endpoint: webhook_endpoint,
+        event: event,
+        payload: payload,
+      )
+
+      WebhookWorker.perform_async(webhook_event.id)
+    end
+  end
+
+  private
+
+  attr_reader :event, :payload
+
+  def initialize(event:, payload:)
+    @event   = event
+    @payload = payload
+  end
+end
+```
+
+In real world, this service may only want to broadcast events to endpoints belonging to specific users. For example, if the app is multi-tenant.
+
+Quick test for the newly created services:
+```
+$ rails c
+> WebhookEvent.delete_all
+# => 1
+> BroadcastWebhookService.call(event: 'events.test', payload: { test: 2 })
+# => nil
+> WebhookEvent.last
+# => #<WebhookEvent
+#       id: 2,
+#       webhook_endpoint_id: 1,
+#       event: "events.test",
+#       payload: { "test" => 2 },
+#       created_at: "2021-06-15 15:43:21.767801000 +0000",
+#       updated_at: "2021-06-15 15:43:21.767801000 +0000",
+#       response: {}
+#     >
+```
+
+It seems that the response is not registered?.
+Well, this is due to the fact that the workeris not running before this. Which is why we need our sidekiq to process and let our workers do the work.
+
+Please do note that our current test is running on local machine and redis require a running server to work. Hence, we need to have at least a "rails s" running and the webhook endpoint must matched the localhost url.
+
+In new terminal pane,
+```
+$ sidekiq
+```
+
+Then, we can go back to our console session and check the last event:
+```
+$ rails c
+> WebhookEvent.last
+# => #<WebhookEvent
+#       id: 2,
+#       webhook_endpoint_id: 2,
+#       event: "events.test",
+#       payload: { "test" => 2 },
+#       created_at: "2021-06-15 15:48:32.801960000 +0000",
+#       updated_at: "2021-06-15 15:48:32.810783000 +0000",
+#       response: {
+#         "body" => "",
+#         "code" => 204,
+#         "headers" => { ... }
+#       }
+#     >
+```
+
+Great, the event was delivered successfully, as indicated by the 204 response.
