@@ -710,3 +710,98 @@ How we handle each of these errors ends up being pretty arbitrary. I just chose 
 1. Retrying the webhook after an error occurs
 2. Disabling an endpoint after a fatal error
 3. Not retrying after an error
+
+## Using pattern matching for special cases
+
+I mentioned ngrok earlier and I wanted to share some information on how you could use Ruby's new pattern matching to handle certain response patterns differently. We'll be applying this to ngrok specifically, but you could use the same logic to match against other types of responses as well.
+
+Take an example — when an ngrok user creates a tunnel to a local server, and then adds that URL as a webhook endpoint, often times the tunnel session will be killed at the end of the day, but the webhook endpoint will still be enabled. I've found this to be a common occurrence with various localhost tunnel services.
+
+One way we can handle these ngrok tunnels is by using pattern matching to match against certain response codes and response bodies from ngrok endpoints.
+
+There are 3 scenarios for ngrok endpoints that we're going to cover today:
+
+1. When an ngrok URL no longer exists. This will return a 404 response code. We'll handle this by completely deleting the endpoint, since non-stable URLs are randomly generated and cannot be recreated.
+
+2. When an ngrok URL is active, but the server being tunneled to is no longer running. This will return a 502 and usually occurs when the developer kills their local server at the end of a work day, but forgets to kill the ngrok session. We'll keep retrying this one, since the ngrok process records the events which can be replayed later on.
+
+3. When a "stable" ngrok URL is valid but there is no active tunnel session. This will return a 504. We'll automatically disable this endpoint.
+
+Let's modify our webhook worker to be able to handle these scenarios:
+```ruby
+def perform(webhook_event_id)
+  ...
+
+  # Exit early if the webhook was successful.
+  return if
+    response.status.success?
+
+  # Handle response errors.
+  case webhook_event
+  in webhook_endpoint: { url: /\.ngrok\.io/ },
+     response: { code: 404, body: /tunnel .+?\.ngrok\.io not found/i }
+    # Automatically delete dead ngrok tunnel endpoints. This error likely
+    # means that the developer forgot to remove their temporary ngrok
+    # webhook endpoint, seeing as it no longer exists.
+    webhook_endpoint.destroy!
+  in webhook_endpoint: { url: /\.ngrok\.io/ },
+     response: { code: 502 }
+    # The bad gateway error usually means that the tunnel is still open
+    # but the local server is no longer responding for any number of
+    # reasons. We're going to automatically retry.
+    raise FailedRequestError
+  in webhook_endpoint: { url: /\.ngrok\.io/ },
+     response: { code: 504 }
+    # Automatically disable these since the endpoint is likely an ngrok
+    # "stable" URL, but it's not currently running. To save bandwidth,
+    # we do not want to automatically retry.
+    webhook_endpoint.disable!
+  else
+    # Raise a failed request error and let Sidekiq handle retrying.
+    raise FailedRequestError
+  end
+
+  ...
+end
+```
+
+This will allow us to match against the hash pattern we define. In our case, we're surfacing the webhook_endpoint, event, payload and the response object.
+
+We can test these scenarios by creating an ngrok tunnel to our local Rails server:
+```
+$ ngrok http 3000
+```
+
+Then we can update our webhook endpoint to use the generated ngrok URL:
+```
+$ rails c
+> WebhookEndpoint.last.update!(
+    url: 'https://349df8f512ea.ngrok.io/webhooks'
+  )
+# => true
+```
+
+Next, we can queu up a new webhook event to send:
+```
+$ rails c
+> BroadcastWebhookService.call(event: 'events.test', payload: { test: 5 })
+# => nil
+> WebhookEvent.last.response
+# => { "body" => "", "code" => 204, "headers" => { ... } }
+```
+
+Looking at our ngrok logs, we see a 204 status code for that webhook. Now, let's kill our ngrok process and send another event:
+
+```
+$ rails c
+> WebhookEndpoint.count
+# => 1
+> BroadcastWebhookService.call(event: 'events.test', payload: { test: 6 })
+# => nil
+> WebhookEndpoint.count
+# => 0
+```
+
+Using pattern matching, our worker (correctly) determined that the bad ngrok webhook endpoint should be deleted, since it's now returning a 404.
+
+Similarly, we can test the other scenarios, for example by keeping the ngrok session active but killing the local Rails server process. But I'll leave that as an exercise for the curious reader.

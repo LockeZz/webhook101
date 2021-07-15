@@ -44,9 +44,37 @@ class WebhookWorker
       body: response.body.to_s
     })
 
-    # Raise a failed request error and let Sidekiq handle retrying 
-    raise FailedRequestError unless 
+    
+
+    # Exit early if the webhook was successful
+    return if 
       response.status.success?
+
+    # Handle response error 
+    case webhook_event 
+    in webhook_endpoint: {url: /\.ngrok\.io/},
+      response: { code: 404, body: /tunnel .+?\.ngrok\.io not found/i }
+      # Automatically delete dead ngrok tunnel endpoints. This error likely
+      # means that the developer forgot to remove their temporary ngrok
+      # webhook endpoint, seeing as it no longer exists.
+      webhook_endpoint.destroy!
+    in webhook_endpoint: { url: /\.ngrok\.io/ },
+      response: { code: 502 }
+      # The bad gateway error usually means that the tunnel is still open
+      # but the local server is no longer responding for any number of
+      # reasons. We're going to automatically retry.
+      raise FailedRequestError
+    in webhook_endpoint: { url: /\.ngrok\.io/ },
+      response: { code: 504 }
+      # Automatically disable these since the endpoint is likely an ngrok
+      # "stable" URL, but it's not currently running. To save bandwidth,
+      # we do not want to automatically retry.
+      webhook_endpoint.disable!
+    else
+      # Raise a failed request error and let Sidekiq handle retrying 
+      raise FailedRequestError unless 
+        response.status.success?
+    end
 
   rescue OpenSSL::SSL::SSLError
     # Since TLS issues may be due to an expired cert, we'll continue retrying

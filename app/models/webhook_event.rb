@@ -3,4 +3,13 @@ class WebhookEvent < ApplicationRecord
 
   validates :event, presence: true 
   validates :payload, presence: true
+
+  def deconstruct_keys(keys)
+    {
+      webhook_endpoint:  {url: webhook_endpoint.url},
+      event: event,
+      payload: payload,
+      response: response.symbolize_keys,
+    }
+  end
 end
