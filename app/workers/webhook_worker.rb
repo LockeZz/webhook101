@@ -12,6 +12,9 @@ class WebhookWorker
     return if 
       webhook_endpoint.nil? 
 
+    return unless 
+      webhook_endpoint.subscribed?(webhook_event.event)
+
     # Send the webhook request with a 30 second timeout 
     response = HTTP.timeout(30).headers(
       'User-Agent' => 'rails_webhook_system/1.0',

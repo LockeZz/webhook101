@@ -399,3 +399,129 @@ $ rails c
 ```
 
 Great, the event was delivered successfully, as indicated by the 204 response.
+
+### Subscribing to certain events
+
+As our list of even types grows, users are likely to only registered to certain of it that suits their interest. In order to allow user to subscribe to only the events they need, we need to make sure they are not spamming the webhook they dont need.
+
+Let's get started by adding new subscription column.
+```
+$ rails g migration AddSubscriptionsToWebhookEndpoints
+```
+Migration file:
+```ruby 
+class AddSubscriptionsToWebhookEndpoints < ActiveRecord::Migration[5.2]
+  def change
+    add_column :webhook_endpoints, :subscriptions, :jsonb, default: ['*']
+  end
+end
+```
+where we use the "*" to inidicate by default, user is subscribe to all event types.
+
+After running "db:migrate", we update our webhook model to required at least 1 subscription and add a helper method to the model to check if a given endpoint is subscribed to an event type.
+
+```ruby
+class WebhookEndpoint < ApplicationRecord
+  has_many :webhook_events, inverse_of: :webhook_endpoint
+
+  validates :subscriptions, length: { minimum: 1 }, presence: true
+  validates :url, presence: true
+
+  def subscribed?(event)
+    (subscriptions & ['*', event]).any?
+  end
+end
+```
+
+A quick test can be conducted using the console:
+```
+$ rails c
+> WebhookEndpoint.last.subscriptions
+# => ["*"]
+> WebhookEndpoint.last.subscribed?('events.noop')
+# => true
+> WebhookEndpoint.last.subscribed?('events.test')
+# => true
+> WebhookEndpoint.last.update!(subscriptions: ['events.test'])
+# => true
+> WebhookEndpoint.last.subscribed?('events.noop')
+# => false
+> WebhookEndpoint.last.subscribed?('events.test')
+# => true
+```
+
+We adjust our service object to skip over endpoints that are not subscribed to the current event being broadcast:
+```ruby 
+def call
+  WebhookEndpoint.find_each do |webhook_endpoint|
+    next unless
+      webhook_endpoint.subscribed?(event)
+
+    webhook_event = WebhookEvent.create!(
+      webhook_endpoint: webhook_endpoint,
+      event: event,
+      payload: payload,
+    )
+
+    WebhookWorker.perform_async(webhook_event.id)
+  end
+end
+
+```
+
+We also need to do the same update to the worker. Let's ajust the webhook worker to skip over event types that the webhook endpoint is not longer subscribed to
+```ruby 
+def perform(webhook_event_id)
+   webhook_event = WebhookEvent.find_by(id: webhook_event_id)
+   return if
+     webhook_event.nil?
+
+   webhook_endpoint = webhook_event.webhook_endpoint
+   return if
+     webhook_endpoint.nil?
+
+  return unless
+    webhook_endpoint.subscribed?(webhook_event.event)
+
+   # Send the webhook request with a 30 second timeout.
+   response = HTTP.timeout(30)
+                  .headers(
+                    'User-Agent' => 'rails_webhook_system/1.0',
+                    'Content-Type' => 'application/json',
+                  )
+                  .post(
+                    webhook_endpoint.url,
+                    body: {
+                      event: webhook_event.event,
+                      payload: webhook_event.payload,
+                    }.to_json
+                  )
+
+   # Store the webhook response.
+   webhook_event.update(response: {
+     headers: response.headers.to_h,
+     code: response.code.to_i,
+     body: response.body.to_s,
+   })
+
+   # Raise a failed request error and let Sidekiq handle retrying.
+   raise FailedRequestError unless
+     response.status.success?
+ rescue HTTP::TimeoutError
+   # This error means the webhook endpoint timed out. We can either
+   # raise a failed request error to trigger a retry, or leave it
+   # as-is and consider timeouts terminal. We'll do the latter.
+   webhook_event.update(response: { error: 'TIMEOUT_ERROR' })
+end
+```
+
+We can once again test this out by queueing up a new event that our endpoint isn't subscribed to.
+```
+$ rails c
+> WebhookEvent.count
+# => 2
+> BroadcastWebhookService.call(event: 'events.noop', payload: { test: 3 })
+# => nil
+> WebhookEvent.count
+# => 2
+```
