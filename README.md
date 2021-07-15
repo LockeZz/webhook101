@@ -106,6 +106,12 @@ Next up, we create a directory in "app/workers" for our worker class to live in.
 $ mkdir app/workers
 $ touch app/workers/webhook_worker.rb
 ```
+Do remeber to register this path in eager loading.
+"config/application.rb"
+```
+config.eager_load_paths += %W( #{config.root}/workers)
+```
+
 Now for the base logic of our webhook worker, it's going to accept a webhook ID as an input parameter, use that to query the endpoint, then post the event payload to the endpoint url. If it fails, it will retry.
 ```ruby
 require 'http.rb'
@@ -246,4 +252,45 @@ $ rails c
 # => true
 > WebhookEvent.last.response
 # => { "error" => "TIMEOUT_ERROR" }
+```
+
+NOTE: IF THE DOMAIN ITSELF IS NOT EXISTED, IT WILL POP ConnectionError and hence timeout error is not registered. As such, the sample code is temporarily using ConnectionError.
+
+Now lets shift our test to localhost:3000.
+```
+$ rails c
+> WebhookEndpoint.last.update!(url: 'http://localhost:3000/webhooks')
+# => true
+
+> WebhookWorker.new.perform(WebhookEvent.last.id)
+# => Traceback (most recent call last):
+#      2: from (irb):17
+#      1: from app/workers/webhook_worker.rb:76:in `perform'
+#    WebhookWorker::FailedRequestError (WebhookWorker::FailedRequestError)
+> WebhookEvent.last.response
+# => { "body" => "...", "code" => 404, "headers" => { ... } }
+```
+
+As we can see, the worker is correctly raising the failed request error for the 404 response, which will signal Sidekiq to automatically retry the job. And you should also see a line in your server logs indicating 404.
+```
+ActionController::RoutingError (No route matches [POST] "/webhooks"):
+```
+
+Well, of coure all we need to do is define the routes:
+```ruby
+Rails.application.routes.draw do
+  post '/webhooks', to: proc { [204, {}, []] }
+end
+```
+and let's go with another delivery attempt , we should expect a 204 response.
+```
+$ rails c
+> WebhookWorker.new.perform(WebhookEvent.last.id)
+# => nil
+> WebhookEvent.last.response
+# => { "body" => "", "code" => 204, "headers" => { ... } }
+```
+Additionally, we should also see a server log indicating that the request was sent: 
+```
+Started POST "/webhooks" for ::1 at 2021-06-15 10:04:34 -0500
 ```
